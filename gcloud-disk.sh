@@ -1,20 +1,24 @@
 #!/usr/bin/env sh
 
+ROOT_DIR=$( cd -P -- "$(dirname -- "$(command -v -- "$0")")" && pwd -P )
+LIBDIR=
+[ -d "${ROOT_DIR}/lib" ] && LIBDIR="${ROOT_DIR}/lib"
+[ -z "$LIBDIR" ] && [ -d "${ROOT_DIR}/../lib" ] && LIBDIR="${ROOT_DIR}/../lib"
+[ -z "$LIBDIR" ] && echo "Cannot find lib dir!" >&2 && exit 1
+
+set -ef
 
 #set -x
 
 # All (good?) defaults
 VERBOSE=1
-MAINDIR=$(readlink -f "$(dirname "$(readlink -f "$0")")/../..")
 if [ -t 1 ]; then
     INTERACTIVE=1
 else
     INTERACTIVE=0
 fi
 
-# Name of temporary Docker volume that will be created to store credentials
-# between runs, if relevant.
-VOLUME=
+
 
 # Name of the disk to create. When empty, a name will be generated from the name
 # of the virtual machine, with an additional dash and 8 random ASCII characters
@@ -96,6 +100,17 @@ USAGE
   exit "$exitcode"
 }
 
+# Source in all relevant modules. This is where most of the "stuff" will occur.
+for module in log gcloud; do
+  module_path="${LIBDIR}/${module}.sh"
+  if [ -f "$module_path" ]; then
+    # shellcheck disable=SC1090
+    . "$module_path"
+  else
+    echo "Cannot find module $module at $module_path !" >& 2
+    exit 1
+  fi
+done
 
 # Parse options
 while [ $# -gt 0 ]; do
@@ -154,68 +169,13 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Colourisation support for logging and output.
-_colour() {
-    if [ "$INTERACTIVE" = "1" ]; then
-        printf '\033[1;31;'${1}'m%b\033[0m' "$2"
-    else
-        printf -- "%b" "$2"
-    fi
-}
-green() { _colour "32" "$1"; }
-red() { _colour "40" "$1"; }
-yellow() { _colour "33" "$1"; }
-blue() { _colour "34" "$1"; }
-
-# Conditional logging
-log() {
-    if [ "$VERBOSE" = "1" ]; then
-        echo "[$(blue "$appname")] [$(yellow info)] [$(date +'%Y%m%d-%H%M%S')] $1" >&2
-    fi
-}
-
-warn() {
-    echo "[$(blue "$appname")] [$(red WARN)] [$(date +'%Y%m%d-%H%M%S')] $1" >&2
-}
-
-# Exit script, making sure to remove the Docker volume that temporarily carried
-# credential information. We should really capture signals and bind on the
-# termination signal to capture all cases. However, this script is meant to be
-# run in controlled and automated contexts, so we should be fine.
-clean_exit() {
-    _code=${1:-0}
-    if [ -n "$VOLUME" ]; then
-        if docker volume ls | grep -q "$VOLUME"; then
-            log "Removing Docker volume $VOLUME"
-            docker volume rm "$VOLUME" >/dev/null
-        fi
-    fi
-
-    exit "$_code"
-}
-
-# Abort program, making sure to cleanup.
-abort() {
-    warn "$1"
-    clean_exit 1
-}
-
-# Generate a random string. Takes two params:
-# $1 length of string, defaults to 8
-# $2 set of characters allowed in string, defaults to lowercase or figures.
-random() {
-    _len=${1:-8}
-    _charset=${2:-a-z0-9};  # Default is lower-case only to please Google
-    tr -dc "${_charset}" < /dev/urandom | fold -w "${_len}" | head -n 1
-}
-
 # Generate good defaults from parameters and perform a first pass at verifying
 # that we have enough parameters to actually start doing something.
-[ -z "$GCLOUD_DISK_SIZE" ] && abort "You must provide a size for the disk"
-[ -z "$GCLOUD_DISK_TYPE" ] && abort "You must provide a type for the disk"
+[ -z "$GCLOUD_DISK_SIZE" ] && gcloud_abort "You must provide a size for the disk"
+[ -z "$GCLOUD_DISK_TYPE" ] && gcloud_abort "You must provide a type for the disk"
 if [ -n "$GCLOUD_DISK_MACHINE" ]; then
     if [ -z "$GCLOUD_DISK_NAME" ]; then
-        GCLOUD_DISK_NAME=${GCLOUD_DISK_MACHINE}-$(random)
+        GCLOUD_DISK_NAME=${GCLOUD_DISK_MACHINE}-$(gcloud_random)
         log "Generated name of disk from machine name: $GCLOUD_DISK_NAME"
     fi
     if [ -z "$GCLOUD_DISK_DEV" ]; then
@@ -225,120 +185,30 @@ if [ -n "$GCLOUD_DISK_MACHINE" ]; then
 else
     warn "The disk will not be attached to a machine!"
 fi
-[ -z "$GCLOUD_DISK_NAME" ] && abort "You must provide a (unique) disk name"
-[ -z "$GCLOUD_DISK_ZONE" ] && abort "You must provide a zone for the disk"
-if [ -n "$GCLOUD_DISK_DOCKER" ] && [ -z "$GCLOUD_DISK_KEY" ]; then
-    abort "You must provide a service account key for authentication"
-fi
-if [ -z "$GCLOUD_DISK_PROJECT" ] && [ -n "$GCLOUD_DISK_KEY" ]; then
-    GCLOUD_DISK_PROJECT=$(grep 'project_id"' "$GCLOUD_DISK_KEY" | sed -E 's/\s*"project_id"\s*:\s*"([^"]*)".*/\1/')
-    log "Extracted project ID $(blue "$GCLOUD_DISK_PROJECT") from key file"
-fi
-[ -z "$GCLOUD_DISK_PROJECT" ] && abort "You must provide a GCloud project identifier"
-
-# Create a Docker volume in which we will be storing credentials for the
-# lifetime of the script. This volume is automatically cleaned up on exit.
-if [ -n "$GCLOUD_DISK_DOCKER" ]; then
-    if ! docker --version 2>&1 >/dev/null; then
-        abort "You must have an installation of Docker accessible to you"
-    fi
-    log "Pulling image $(yellow "$GCLOUD_DISK_DOCKER") for gcloud operations"
-    docker image pull "$GCLOUD_DISK_DOCKER" >/dev/null
-    VOLUME="${appname}"-$(random)
-    log "Creating Docker volume $(yellow "$VOLUME") to temporarily store credentials"
-    docker volume create "$VOLUME" >/dev/null
-fi
-
-# This is an internal relay alias against the gcloud command. This script has
-# only been tested with a Docker image and running a number of containers, but
-# it should be able to run locally also.
-gcloud() {
-    if [ -z "$VOLUME" ]; then
-        gcloud --project "$GCLOUD_DISK_PROJECT" $@
-    else
-        # When running through Docker, we arrange for two volume mounts: The
-        # first volume is pointed to where gcloud stores its credentials and
-        # configuration so that consecutive calls will keep authorisation data
-        # as the phases of the script progress. The second mount recreates the
-        # same directory structure as where the key file is located. This is
-        # only used at authorisation time, so that the call will look the same
-        # with or without docker.
-        docker run --rm \
-            -v "${VOLUME}:/root/.config/gcloud" \
-            "$GCLOUD_DISK_DOCKER" \
-            gcloud --project "$GCLOUD_DISK_PROJECT" $@
-    fi
-}
-
-# Copy a file into a volume, implicitely using the same Docker image as the one
-# used within the remaining of this script to avoid extra downloads. The volume
-# is mounted on a directory with random letters to avoid name collisions.
-# Arguments are:
-# $1: Path to the file (mandatory)
-# $2: Name of the destination volume (mandatory)
-# $3: Name of the destination file in the volume, defaults to basename of $1
-volume_cp() {
-    _dst=${3:-$(basename "$1")}
-    _dirname=${appname}_$(random)
-    cat "$1" |
-        docker run -i --rm \
-            -v "${2}:/${_dirname}" \
-            "$GCLOUD_DISK_DOCKER" \
-            tee "/${_dirname}/${_dst}" >/dev/null
-}
-
-# Any use of the gcloud command requires authentication, so we start by doing
-# this as soon as possible.
-if [ -n "$GCLOUD_DISK_KEY" ]; then
-    log "Logging in at GCloud with $(red "$GCLOUD_DISK_KEY")"
-    # If running without Docker, we have an empty VOLUME. In that case, we
-    # simply authenticate locally. When running Docker, this is more
-    # cumbersome... For unknown reasons, it is NOT possible to mount the file
-    # into a container to be able to read it from the "gcloud auth" call. While
-    # this works at the command line, it does NOT work when automated from
-    # machinery. Instead, we copy the file into the temporary volume and
-    # authenticate from the copy.
-    if [ -z "$VOLUME" ]; then
-        if ! gcloud auth activate-service-account \
-                --key-file "$GCLOUD_DISK_KEY"; then
-            abort "Could not login at GCloud"
-        fi
-    else
-        # Find name of key file, so we copy into the docker container and keep naming.
-        _keyfile=$(basename "$GCLOUD_DISK_KEY")
-
-        # Copy the content of the locally available and readable key file into
-        # the volume that is designated to carry gcloud-specific configuration
-        # data. We encapsulate by prefixing the name of the application to avoid
-        # name collisions.
-        volume_cp "$GCLOUD_DISK_KEY" "${VOLUME}" "${appname}_${_keyfile}"
-        # Now login using the copy of the file within the volume.
-        if ! docker run --rm \
-                -v "${VOLUME}:/root/.config/gcloud" \
-                "$GCLOUD_DISK_DOCKER" \
-                gcloud auth activate-service-account \
-                    --key-file "/root/.config/gcloud/${appname}_${_keyfile}" >/dev/null; then
-            abort "Could not login at GCloud"
-        fi
-    fi
-fi
+[ -z "$GCLOUD_DISK_NAME" ] && gcloud_abort "You must provide a (unique) disk name"
+[ -z "$GCLOUD_DISK_ZONE" ] && gcloud_abort "You must provide a zone for the disk"
+gcloud_init \
+    --project "$GCLOUD_DISK_PROJECT" \
+    --docker "$GCLOUD_DISK_DOCKER" \
+    --key "$GCLOUD_DISK_KEY"
+gcloud_login
 
 # Verify input against what Google provides, e.g. zone, machine name, disk type,
 # etc.
 log "Verifying parameters..."
 log "  Verifying zone"
 if ! gcloud compute zones list | grep -q "$GCLOUD_DISK_ZONE"; then
-    abort "Zone $(red "$GCLOUD_DISK_ZONE") does not exist at GCloud"
+    gcloud_abort "Zone $(red "$GCLOUD_DISK_ZONE") does not exist at GCloud"
 fi
 if [ -n "$GCLOUD_DISK_MACHINE" ]; then
     log "  Verifying machine"
     if ! gcloud compute instances describe --zone="$GCLOUD_DISK_ZONE" "$GCLOUD_DISK_MACHINE" 2>&1 >/dev/null; then
-        abort "Machine $(red "$GCLOUD_DISK_MACHINE") does not seem to exist"
+        gcloud_abort "Machine $(red "$GCLOUD_DISK_MACHINE") does not seem to exist"
     fi
 fi
 log "  Verifying disk type"
 if ! gcloud compute disk-types list --zones="$GCLOUD_DISK_ZONE" | grep -q "$GCLOUD_DISK_TYPE"; then
-    abort "Disk type $(red "$GCLOUD_DISK_TYPE") not available in $GCLOUD_DISK_ZONE"
+    gcloud_abort "Disk type $(red "$GCLOUD_DISK_TYPE") not available in $GCLOUD_DISK_ZONE"
 fi
 
 # Create Disk at Google, if it does not exist already.
@@ -350,7 +220,7 @@ else
             --zone="$GCLOUD_DISK_ZONE" \
             --size="$GCLOUD_DISK_SIZE" \
             --type="$GCLOUD_DISK_TYPE" >/dev/null; then
-        abort "Could not create disk $(red "$GCLOUD_DISK_NAME")"
+        gcloud_abort "Could not create disk $(red "$GCLOUD_DISK_NAME")"
     fi
 fi
 
@@ -361,7 +231,7 @@ if [ -n "$GCLOUD_DISK_MACHINE" ]; then
             --zone="$GCLOUD_DISK_ZONE" \
             --disk="$GCLOUD_DISK_NAME" \
             --device-name="$GCLOUD_DISK_DEV" >/dev/null; then
-        abort "Could not attach disk $(red "$GCLOUD_DISK_NAME") to $GCLOUD_DISK_MACHINE!"
+        gcloud_abort "Could not attach disk $(red "$GCLOUD_DISK_NAME") to $GCLOUD_DISK_MACHINE!"
     fi
 
     # Verify that the disk was actually attached. This is probably superfluous.
@@ -370,8 +240,8 @@ if [ -n "$GCLOUD_DISK_MACHINE" ]; then
             --format="yaml(disks)"|grep "deviceName"|grep -q "$GCLOUD_DISK_NAME"; then
         log "Attached disk $(green "$GCLOUD_DISK_NAME") to $GCLOUD_DISK_MACHINE"
     else
-        abort "Disk not attached!"
+        gcloud_abort "Disk not attached!"
     fi
 fi
 
-clean_exit
+gcloud_exit
