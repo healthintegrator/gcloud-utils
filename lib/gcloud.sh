@@ -15,8 +15,13 @@ GCLOUD_KEY=${GCLOUD_KEY:-}
 GCLOUD_PROJECT=${GCLOUD_PROJECT:-}
 
 # Name of temporary Docker volume that will be created to store credentials
-# between runs, if relevant.
-VOLUME=
+# between runs, if relevant. When empty, a good name will be generated and the
+# volume will be automatically removed at exit.
+GCLOUD_VOLUME=${GCLOUD_VOLUME:-}
+
+KEEP_VOLUME=0
+
+appname=${appname:-"gcloud"}
 
 gcloud_options() {
   while [ $# -gt 0 ]; do
@@ -35,6 +40,11 @@ gcloud_options() {
         GCLOUD_PROJECT="$2"; shift 2;;
       --project=*)
         GCLOUD_PROJECT="${1#*=}"; shift 1;;
+
+      -v | --volume)
+        GCLOUD_VOLUME="$2"; shift 2;;
+      --volume=*)
+        GCLOUD_VOLUME="${1#*=}"; shift 1;;
 
       -*)
         warn "$1 is not a known option"; shift 2;;
@@ -123,7 +133,7 @@ gcloud_regtags() {
     printf %s\\n "$page" |
         grep -Eo '"name":\s*"[a-zA-Z0-9_.-]+"' |
         sed -E 's/"name":\s*"([a-zA-Z0-9_.-]+)"/\1/' |
-        grep -E "$_filter" || true
+        grep -E "$_filter" 2>/dev/null || true
   done
 }
 
@@ -134,10 +144,10 @@ gcloud_regtags() {
 # run in controlled and automated contexts, so we should be fine.
 gcloud_exit() {
     _code=${1:-0}
-    if [ -n "$VOLUME" ]; then
-        if docker volume ls | grep -q "$VOLUME"; then
-            log "Removing Docker volume $VOLUME" gcloud
-            docker volume rm "$VOLUME" >/dev/null
+    if [ -n "$GCLOUD_VOLUME" ] && [ "$KEEP_VOLUME" = "0" ]; then
+        if docker volume ls | grep -q "$GCLOUD_VOLUME"; then
+            log "Removing Docker volume $GCLOUD_VOLUME" gcloud
+            docker volume rm "$GCLOUD_VOLUME" >/dev/null
         fi
     fi
 
@@ -152,42 +162,69 @@ gcloud_abort() {
 # Generate a random string. Takes two params:
 # $1 length of string, defaults to 8
 # $2 set of characters allowed in string, defaults to lowercase or figures.
+# shellcheck disable=SC2120
 gcloud_random() {
     _len=${1:-8}
-    _charset=${2:-a-z0-9};  # Default is lower-case only to please Google
-    tr -dc "${_charset}" < /dev/urandom | fold -w "${_len}" | head -n 1
+    _charset=${2:-"a-z0-9"};  # Default is lower-case only to please Google
+    LC_ALL=C tr -dc "${_charset}" </dev/urandom 2>/dev/null | head -c"$((_len*2))" | tr -d '\n' | tr -d '\0' | head -c"$_len"
 }
 
 gcloud_init() {
   # Considder any parameters as options, if relevant.
   gcloud_options "$@"
 
-  if [ -n "$GCLOUD_DOCKER" ] && [ -z "$GCLOUD_KEY" ]; then
-    gcloud_abort "You must provide a service account key for authentication"
+  if [ -n "$GCLOUD_DOCKER" ]; then
+    if [ -z "$GCLOUD_KEY" ] && [ -z "$GCLOUD_VOLUME" ]; then
+      gcloud_abort "You must provide a service account key, or a previous volume for authentication"
+    fi
   fi
   if [ -z "$GCLOUD_PROJECT" ] && [ -n "$GCLOUD_KEY" ]; then
     GCLOUD_PROJECT=$(grep 'project_id"' "$GCLOUD_KEY" | sed -E 's/\s*"project_id"\s*:\s*"([^"]*)".*/\1/')
     log "Extracted project ID $(blue "$GCLOUD_PROJECT") from key file" gcloud
   fi
-  [ -z "$GCLOUD_PROJECT" ] && gcloud_abort "You must provide a GCloud project identifier"
 
   # Create a Docker volume in which we will be storing credentials for the
   # lifetime of the script. This volume is automatically cleaned up on exit.
   if [ -n "$GCLOUD_DOCKER" ]; then
-    if ! docker --version 2>&1 >/dev/null; then
+    # Check that Docker is installed
+    if ! docker --version >/dev/null 2>&1; then
       gcloud_abort "You must have an installation of Docker accessible to you"
     fi
+
+    # Discover latest Google SDK Docker image if no tag specified.
     if ! printf %s\\n "$GCLOUD_DOCKER" | grep -qE ':[a-zA-Z0-9_.-]+$'; then
       log "No tag provided for $GCLOUD_DOCKER, discovering latest..."
       tag=$(gcloud_regtags --pages 2 --filter '[0-9]+(.[0-9]+)*-alpine$' "$GCLOUD_DOCKER" | head -n 1)
       [ -z "$tag" ] && gcloud_abort "Could not discover latest official tag for $GCLOUD_DOCKER!"
       GCLOUD_DOCKER=${GCLOUD_DOCKER}:$tag
     fi
+
+    # Arrange for Docker image to be present
     log "Pulling image $(yellow "$GCLOUD_DOCKER") for gcloud operations" gcloud
     docker image pull "$GCLOUD_DOCKER" >/dev/null
-    VOLUME="${appname}"-$(gcloud_random)
-    log "Creating Docker volume $(yellow "$VOLUME") to temporarily store credentials" gcloud
-    docker volume create "$VOLUME" >/dev/null
+
+    # Create temporary Docker volume, or make sure that it exists.
+    if [ -z "$GCLOUD_VOLUME" ]; then
+      GCLOUD_VOLUME="${appname}"-$(gcloud_random)
+      log "Creating temporary Docker volume $(yellow "$GCLOUD_VOLUME") to store credentials" gcloud
+      docker volume create "$GCLOUD_VOLUME" >/dev/null
+      KEEP_VOLUME=0
+    elif ! docker volume ls | grep -q "$GCLOUD_VOLUME"; then
+      log "Creating persistent Docker volume $(yellow "$GCLOUD_VOLUME") to store credentials" gcloud
+      docker volume create "$GCLOUD_VOLUME" >/dev/null
+      KEEP_VOLUME=1
+    else
+      if [ -z "$GCLOUD_PROJECT" ]; then
+        _account=$(gcloud info --format='value(config.account)')
+        GCLOUD_PROJECT=$(printf %s\\n "$_account" | sed -E 's/^[^@]+@([[:alnum:]-]+).iam.gserviceaccount.com$/\1/g')
+        log "Extracted project ID $(blue "$GCLOUD_PROJECT") from account name $_account" gcloud
+      fi
+      KEEP_VOLUME=1
+    fi
+  fi
+
+  if [ -z "$GCLOUD_PROJECT" ]; then
+    gcloud_abort "You must provide a GCloud project identifier"
   fi
 }
 
@@ -195,8 +232,13 @@ gcloud_init() {
 # only been tested with a Docker image and running a number of containers, but
 # it should be able to run locally also.
 gcloud() {
-  if [ -z "$VOLUME" ]; then
-    gcloud --project "$GCLOUD_PROJECT" $@
+  # Force prepending of project to options given to gcloud
+  if [ -n "$GCLOUD_PROJECT" ]; then
+    set -- --project "$GCLOUD_PROJECT" "$@"
+  fi
+
+  if [ -z "$GCLOUD_VOLUME" ]; then
+    gcloud "$@"
   else
     # When running through Docker, we arrange for two volume mounts: The
     # first volume is pointed to where gcloud stores its credentials and
@@ -207,11 +249,10 @@ gcloud() {
     # with or without docker.
     docker run \
         --rm \
-        -v "${VOLUME}:/root/.config/gcloud" \
+        -v "${GCLOUD_VOLUME}:/root/.config/gcloud" \
       "$GCLOUD_DOCKER" \
         gcloud \
-          --project "$GCLOUD_PROJECT" \
-          $@
+          "$@"
   fi
 }
 
@@ -225,11 +266,11 @@ gcloud() {
 _gcloud_volume_cp() {
     _dst=${3:-$(basename "$1")}
     _dirname=${appname}_$(gcloud_random)
-    cat "$1" |
+    
         docker run -i --rm \
             -v "${2}:/${_dirname}" \
             "$GCLOUD_DOCKER" \
-            tee "/${_dirname}/${_dst}" >/dev/null
+            tee "/${_dirname}/${_dst}" <"$1" >/dev/null
 }
 
 # Any use of the gcloud command requires authentication, so we start by doing
@@ -237,14 +278,14 @@ _gcloud_volume_cp() {
 gcloud_login() {
   if [ -n "$GCLOUD_KEY" ]; then
     log "Logging in at GCloud with $(red "$GCLOUD_KEY")" gcloud
-    # If running without Docker, we have an empty VOLUME. In that case, we
+    # If running without Docker, we have an empty GCLOUD_VOLUME. In that case, we
     # simply authenticate locally. When running Docker, this is more
     # cumbersome... For unknown reasons, it is NOT possible to mount the file
     # into a container to be able to read it from the "gcloud auth" call. While
     # this works at the command line, it does NOT work when automated from
     # machinery. Instead, we copy the file into the temporary volume and
     # authenticate from the copy.
-    if [ -z "$VOLUME" ]; then
+    if [ -z "$GCLOUD_VOLUME" ]; then
       if ! gcloud auth activate-service-account \
               --key-file "$GCLOUD_KEY"; then
         gcloud_abort "Could not login at GCloud"
@@ -257,10 +298,10 @@ gcloud_login() {
       # the volume that is designated to carry gcloud-specific configuration
       # data. We encapsulate by prefixing the name of the application to avoid
       # name collisions.
-      _gcloud_volume_cp "$GCLOUD_KEY" "${VOLUME}" "${appname}_${_keyfile}"
+      _gcloud_volume_cp "$GCLOUD_KEY" "${GCLOUD_VOLUME}" "${appname}_${_keyfile}"
       # Now login using the copy of the file within the volume.
       if ! docker run --rm \
-              -v "${VOLUME}:/root/.config/gcloud" \
+              -v "${GCLOUD_VOLUME}:/root/.config/gcloud" \
               "$GCLOUD_DOCKER" \
               gcloud auth activate-service-account \
                   --key-file "/root/.config/gcloud/${appname}_${_keyfile}" >/dev/null; then
