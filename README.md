@@ -12,13 +12,20 @@ default to running it from [docker][gcloud-docker]
 
 At present, the utilities are:
 
-* [gcloud-disk](./gcloud-disk.sh) will create a disk and attach it to a virtual
-  instance without formatting. Formatting can be automated through other means,
-  e.g. [primer](https://github.com/efrecon/primer)
-* [gcloud-tags](./gcloud-tags.sh) will add network tags to an instance if they
-  do not already exist.
+* [gcloud-disk.sh](./gcloud-disk.sh) will create a disk and attach it to a
+  virtual instance without formatting. Formatting can be automated through other
+  means, e.g. [primer](https://github.com/efrecon/primer)
+* [gcloud-tags.sh](./gcloud-tags.sh) will add network tags to an instance if
+  they do not already exist.
+* [gcloud.sh](./gcloud.sh) is a Docker wrapper around the regular `gcloud`. It
+  will login using the service account key passed as argument and call `gcloud`
+  with the arguments passed at the command-line. It uses a (temporary) volume
+  for authentication credentials, but is able to reuse a named volume between
+  calls when such a volume name is passed as an argument.
 
 The utilities are constructed on top of a library aiming at hiding most of the
 `gcloud` calling details. The library is able to detect the latest numbered
 version of the Docker image for the `gcloud` CLI, or handles login using a
-separate transient Docker volume.
+separate transient Docker volume. The library is able to reuse the Docker volume
+between runs to avoid re-authenticating several times. In that case, it is up to
+the caller to remove the Docker volume once all operations have been performed.
