@@ -12,11 +12,7 @@ set -ef
 
 # All (good?) defaults
 VERBOSE=1
-if [ -t 1 ]; then
-    INTERACTIVE=1
-else
-    INTERACTIVE=0
-fi
+
 
 # Path to the service account key. This needs to be provided when running with
 # Docker.
@@ -120,7 +116,7 @@ gcloud_login
 
 # Verify input against what Google provides
 log "Verifying machine"
-if ! gcloud compute instances describe --zone="$GCLOUD_TAGS_ZONE" "$GCLOUD_TAGS_MACHINE" 2>&1 >/dev/null; then
+if ! gcloud compute instances describe --zone="$GCLOUD_TAGS_ZONE" "$GCLOUD_TAGS_MACHINE" >/dev/null 2>&1; then
     gcloud_abort "Machine $(red "$GCLOUD_TAGS_MACHINE") does not seem to exist"
 fi
 
