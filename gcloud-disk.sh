@@ -12,13 +12,6 @@ set -ef
 
 # All (good?) defaults
 VERBOSE=1
-if [ -t 1 ]; then
-    INTERACTIVE=1
-else
-    INTERACTIVE=0
-fi
-
-
 
 # Name of the disk to create. When empty, a name will be generated from the name
 # of the virtual machine, with an additional dash and 8 random ASCII characters
@@ -202,7 +195,7 @@ if ! gcloud compute zones list | grep -q "$GCLOUD_DISK_ZONE"; then
 fi
 if [ -n "$GCLOUD_DISK_MACHINE" ]; then
     log "  Verifying machine"
-    if ! gcloud compute instances describe --zone="$GCLOUD_DISK_ZONE" "$GCLOUD_DISK_MACHINE" 2>&1 >/dev/null; then
+    if ! gcloud compute instances describe --zone="$GCLOUD_DISK_ZONE" "$GCLOUD_DISK_MACHINE" >/dev/null 2>&1; then
         gcloud_abort "Machine $(red "$GCLOUD_DISK_MACHINE") does not seem to exist"
     fi
 fi
@@ -212,7 +205,7 @@ if ! gcloud compute disk-types list --zones="$GCLOUD_DISK_ZONE" | grep -q "$GCLO
 fi
 
 # Create Disk at Google, if it does not exist already.
-if gcloud compute disks describe --zone="$GCLOUD_DISK_ZONE" "$GCLOUD_DISK_NAME" 2>&1 >/dev/null; then
+if gcloud compute disks describe --zone="$GCLOUD_DISK_ZONE" "$GCLOUD_DISK_NAME" >/dev/null 2>&1; then
     warn "Disk $GCLOUD_DISK_NAME already exists in $GCLOUD_DISK_ZONE, will not change nor recreate"
 else
     log "Creating disk $GCLOUD_DISK_NAME"

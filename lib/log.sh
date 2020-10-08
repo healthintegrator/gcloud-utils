@@ -1,6 +1,11 @@
 #!/usr/bin/env sh
 
 VERBOSE=${VERBOSE:-0}
+if [ -t 1 ]; then
+    INTERACTIVE=1
+else
+    INTERACTIVE=0
+fi
 
 # Colourisation support for logging and output.
 _colour() {
