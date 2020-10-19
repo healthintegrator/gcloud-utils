@@ -24,8 +24,9 @@ GCLOUD_DISK_ZONE=${GCLOUD_DISK_ZONE:-europe-north1-b}
 
 # Name of the Google SDK Docker image to use. This can in theory be set to an
 # empty string, in which case the script will use a local installation of
-# gcloud.
-GCLOUD_DISK_DOCKER=${GCLOUD_DISK_DOCKER:-google/cloud-sdk:309.0.0-alpine}
+# gcloud. When no tag is specified, this is understood as the latest stable (not
+# the latest).
+GCLOUD_DISK_DOCKER=${GCLOUD_DISK_DOCKER:-google/cloud-sdk}
 
 # Path to the service account key. This needs to be provided when running with
 # Docker.
