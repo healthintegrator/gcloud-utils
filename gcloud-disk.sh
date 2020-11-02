@@ -56,6 +56,7 @@ GCLOUD_DISK_DEV=${GCLOUD_DISK_DEV:-}
 
 # Dynamic vars
 cmdname=$(basename "$(readlink -f "$0")")
+# shellcheck disable=SC2034
 appname=${cmdname%.*}
 
 # Print usage on stderr and exit
@@ -150,6 +151,7 @@ while [ $# -gt 0 ]; do
             GCLOUD_DISK_PROJECT="${1#*=}"; shift 1;;
 
         --silent)
+            # shellcheck disable=SC2034
             VERBOSE=0; shift;;
 
         -h | --help)
