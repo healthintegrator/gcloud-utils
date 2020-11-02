@@ -22,6 +22,10 @@ At present, the utilities are:
   with the arguments passed at the command-line. It uses a (temporary) volume
   for authentication credentials, but is able to reuse a named volume between
   calls when such a volume name is passed as an argument.
+* [gcloud-ifcreate.sh](./gcloud-ifcreate.sh) is a Docker wrapper around all
+  `gcloud` CLI commands that support the list/create operations. It will list
+  resources, looking for an existing one with the name passed at the CLI, and
+  create it if it did not exist without generating any error.
 
 The utilities are constructed on top of a library aiming at hiding most of the
 `gcloud` calling details. The library is able to detect the latest numbered
